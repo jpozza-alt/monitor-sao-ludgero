@@ -42,7 +42,7 @@ def inicio():
     return {
         "status": "online",
         "sistema": "Monitor São Ludgero API",
-        "versao": "1.1"
+        "versao": "1.2"
     }
 
 
@@ -93,8 +93,11 @@ def risco_hidrologico():
 @app.get("/alertas-ativos")
 def alertas_ativos():
     return {
-        "status": "em desenvolvimento",
-        "mensagem": "Endpoint reservado para INMET, Defesa Civil SC e outros alertas."
+        "fonte_principal": "INMET",
+        "status": "parcialmente integrado",
+        "observacao": "O INMET publica avisos meteorológicos no sistema Alert-AS. A integração automática completa será feita na próxima etapa.",
+        "consulta_manual": "https://alertas2.inmet.gov.br/",
+        "leitura_operacional": "Consultar avisos ativos para Santa Catarina e verificar se São Ludgero está dentro da área de abrangência."
     }
 
 
