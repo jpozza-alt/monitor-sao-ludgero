@@ -2,7 +2,7 @@ from fastapi import FastAPI
 import requests
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 app = FastAPI(title="Monitor São Ludgero API")
 
@@ -139,138 +139,66 @@ def buscar_alertas_inmet():
     return alertas
 
 
-def procurar_valor_numerico(item):
-    chaves_possiveis = [
-        "nivel",
-        "Nivel",
-        "cota",
-        "Cota",
-        "valor",
-        "Valor",
-        "valorNivel",
-        "ValorNivel",
-        "nivelConsistido",
-        "NivelConsistido"
-    ]
-
-    for chave in chaves_possiveis:
-        if chave in item and item[chave] is not None:
-            try:
-                return float(str(item[chave]).replace(",", "."))
-            except Exception:
-                pass
-
-    return None
-
-
-def procurar_data(item):
-    chaves_possiveis = [
-        "dataHora",
-        "DataHora",
-        "data",
-        "Data",
-        "horario",
-        "Horario",
-        "dataMedicao",
-        "DataMedicao"
-    ]
-
-    for chave in chaves_possiveis:
-        if chave in item and item[chave]:
-            return item[chave]
-
-    return None
-
-
 def buscar_nivel_ana():
-    url_estacao = "https://www.snirh.gov.br/hidroweb/rest/api/estacaotelemetrica"
-    params_estacao = {"id": CODIGO_ANA_BRACO_NORTE}
+    hoje = datetime.now()
+    inicio = hoje - timedelta(days=3)
 
-    r1 = requests.get(url_estacao, params=params_estacao, timeout=25)
-    r1.raise_for_status()
-    estacao = r1.json()
+    data_inicio = inicio.strftime("%d/%m/%Y")
+    data_fim = hoje.strftime("%d/%m/%Y")
 
-    codigo_interno = estacao.get("id") or estacao.get("codigo") or estacao.get("codEstacao")
-
-    if not codigo_interno:
-        return {
-            "status": "erro",
-            "mensagem": "Não foi possível obter o código interno da estação ANA.",
-            "retorno_estacao": estacao
-        }
-
-    agora_utc = datetime.now(timezone.utc)
-    inicio_utc = agora_utc - timedelta(days=3)
-
-    periodo_inicial = inicio_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    periodo_final = agora_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-    url_dados = "https://www.snirh.gov.br/hidroweb/rest/api/documento/gerarTelemetricas"
-    params_dados = {
-        "codigosEstacoes": codigo_interno,
-        "tipoArquivo": 2,
-        "periodoInicial": periodo_inicial,
-        "periodoFinal": periodo_final
+    url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
+    params = {
+        "CodEstacao": CODIGO_ANA_BRACO_NORTE,
+        "DataInicio": data_inicio,
+        "DataFim": data_fim
     }
 
-    r2 = requests.get(url_dados, params=params_dados, timeout=40)
-    r2.raise_for_status()
+    resposta = requests.get(url, params=params, timeout=30)
+    resposta.raise_for_status()
 
-    dados = r2.json()
+    raiz = ET.fromstring(resposta.content)
 
-    if isinstance(dados, dict):
-        lista = dados.get("content") or dados.get("dados") or dados.get("items") or []
-    elif isinstance(dados, list):
-        lista = dados
-    else:
-        lista = []
+    medicoes = []
 
-    medicoes_validas = []
+    for item in raiz.iter():
+        tags = {filho.tag.split("}")[-1]: filho.text for filho in list(item)}
 
-    for item in lista:
-        if not isinstance(item, dict):
-            continue
+        if "Nivel" in tags:
+            try:
+                nivel_texto = tags.get("Nivel")
+                nivel_cm = float(str(nivel_texto).replace(",", "."))
 
-        valor = procurar_valor_numerico(item)
-        data = procurar_data(item)
+                medicoes.append({
+                    "data_hora": tags.get("DataHora"),
+                    "nivel_cm": nivel_cm,
+                    "vazao": tags.get("Vazao")
+                })
+            except Exception:
+                continue
 
-        if valor is not None:
-            medicoes_validas.append({
-                "data": data,
-                "cota_cm": valor,
-                "item_original": item
-            })
-
-    if not medicoes_validas:
+    if not medicoes:
         return {
             "status": "sem_dados",
-            "mensagem": "A ANA respondeu, mas não foram encontradas medições válidas de nível/cota.",
+            "fonte": "ANA / TelemetriaWS1",
+            "estacao": "Braço do Norte - Montante",
             "codigo_ana": CODIGO_ANA_BRACO_NORTE,
-            "codigo_interno": codigo_interno,
-            "amostra_retorno": lista[:3]
+            "mensagem": "A ANA respondeu, mas não retornou medições de nível para os últimos 3 dias."
         }
 
-    ultima = medicoes_validas[-1]
-    cota_cm = ultima["cota_cm"]
-    cota_m = round(cota_cm / 100, 2)
-    situacao = classificar_nivel_rio(cota_cm)
+    ultima = medicoes[-1]
+    nivel_cm = ultima["nivel_cm"]
+    nivel_m = round(nivel_cm / 100, 2)
 
     return {
         "status": "ok",
-        "fonte": "ANA / HidroWeb Telemetria",
+        "fonte": "ANA / TelemetriaWS1",
         "estacao": "Braço do Norte - Montante",
         "codigo_ana": CODIGO_ANA_BRACO_NORTE,
-        "codigo_interno": codigo_interno,
-        "data_ultima_medicao": ultima["data"],
-        "nivel_cm": cota_cm,
-        "nivel_m": cota_m,
-        "situacao": situacao,
-        "criterios_cm": {
-            "normal": "24,01 a 500 cm",
-            "atencao_enchente": "500,01 a 600 cm",
-            "alerta_enchente": "600,01 a 700 cm",
-            "emergencia_enchente": "acima de 700 cm"
-        }
+        "data_ultima_medicao": ultima["data_hora"],
+        "nivel_cm": nivel_cm,
+        "nivel_m": nivel_m,
+        "vazao": ultima["vazao"],
+        "situacao": classificar_nivel_rio(nivel_cm)
     }
 
 
@@ -279,7 +207,7 @@ def inicio():
     return {
         "status": "online",
         "sistema": "Monitor São Ludgero API",
-        "versao": "1.6"
+        "versao": "1.7"
     }
 
 
@@ -297,8 +225,7 @@ def previsao_chuva(dias: int = 7):
 @app.get("/risco-hidrologico")
 def risco_hidrologico():
     dados = buscar_previsao(7)
-    diaria = dados.get("daily", {})
-    chuva = diaria.get("precipitation_sum", [])
+    chuva = dados.get("daily", {}).get("precipitation_sum", [])
 
     chuva_24h = round(sum(chuva[:1]), 1)
     chuva_48h = round(sum(chuva[:2]), 1)
@@ -347,7 +274,7 @@ def nivel_rio_braco_norte():
     except Exception as erro:
         return {
             "status": "erro_na_consulta",
-            "fonte": "ANA / HidroWeb Telemetria",
+            "fonte": "ANA / TelemetriaWS1",
             "estacao": "Braço do Norte - Montante",
             "codigo_ana": CODIGO_ANA_BRACO_NORTE,
             "mensagem": "Não foi possível consultar automaticamente o nível do rio na ANA neste momento.",
