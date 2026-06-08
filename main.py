@@ -10,7 +10,8 @@ LAT = -28.325
 LON = -49.176
 TIMEZONE = "America/Sao_Paulo"
 
-CODIGO_ANA_BRACO_NORTE = "84559800"
+CODIGO_ANA_NIVEL_BRACO_NORTE = "84559800"
+CODIGO_ANA_CHUVA_BRACO_NORTE = "2849030"
 
 TERMOS_REGIAO_SC = [
     "Sul Catarinense",
@@ -20,6 +21,37 @@ TERMOS_REGIAO_SC = [
     "Norte Catarinense",
     "Oeste Catarinense"
 ]
+
+
+def consultar_ana(codigo_estacao: str, dias: int = 10):
+    hoje = datetime.now()
+    inicio = hoje - timedelta(days=dias)
+
+    url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
+    params = {
+        "CodEstacao": codigo_estacao,
+        "DataInicio": inicio.strftime("%d/%m/%Y"),
+        "DataFim": hoje.strftime("%d/%m/%Y")
+    }
+
+    resposta = requests.get(url, params=params, timeout=30)
+    resposta.raise_for_status()
+
+    raiz = ET.fromstring(resposta.content)
+    registros = []
+
+    for item in raiz.iter():
+        tags = {filho.tag.split("}")[-1]: filho.text for filho in list(item)}
+
+        if tags.get("CodEstacao") == codigo_estacao:
+            registros.append({
+                "data_hora": tags.get("DataHora"),
+                "nivel": tags.get("Nivel"),
+                "vazao": tags.get("Vazao"),
+                "chuva": tags.get("Chuva")
+            })
+
+    return registros
 
 
 def buscar_previsao(dias: int = 7):
@@ -32,6 +64,7 @@ def buscar_previsao(dias: int = 7):
         "timezone": TIMEZONE,
         "forecast_days": dias
     }
+
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
     return r.json()
@@ -87,6 +120,7 @@ def buscar_alertas_inmet():
         try:
             url_aviso = f"https://apiprevmet3.inmet.gov.br/avisos/rss/{aviso_id}"
             r = requests.get(url_aviso, timeout=15)
+
             if r.status_code != 200:
                 continue
 
@@ -130,32 +164,20 @@ def buscar_alertas_inmet():
 
 
 def buscar_nivel_ana():
-    hoje = datetime.now()
-    inicio = hoje - timedelta(days=10)
+    registros = consultar_ana(CODIGO_ANA_NIVEL_BRACO_NORTE, dias=10)
 
-    url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
-    params = {
-        "CodEstacao": CODIGO_ANA_BRACO_NORTE,
-        "DataInicio": inicio.strftime("%d/%m/%Y"),
-        "DataFim": hoje.strftime("%d/%m/%Y")
-    }
-
-    resposta = requests.get(url, params=params, timeout=30)
-    resposta.raise_for_status()
-
-    raiz = ET.fromstring(resposta.content)
     medicoes = []
 
-    for item in raiz.iter():
-        tags = {filho.tag.split("}")[-1]: filho.text for filho in list(item)}
+    for r in registros:
+        nivel = r.get("nivel")
 
-        if "Nivel" in tags:
+        if nivel:
             try:
-                nivel_cm = float(str(tags.get("Nivel")).replace(",", "."))
+                nivel_cm = float(str(nivel).replace(",", "."))
                 medicoes.append({
-                    "data_hora": tags.get("DataHora"),
+                    "data_hora": r.get("data_hora"),
                     "nivel_cm": nivel_cm,
-                    "vazao": tags.get("Vazao")
+                    "vazao": r.get("vazao")
                 })
             except Exception:
                 continue
@@ -165,8 +187,9 @@ def buscar_nivel_ana():
             "status": "sem_dados",
             "fonte": "ANA / TelemetriaWS1",
             "estacao": "Braço do Norte - Montante",
-            "codigo_ana": CODIGO_ANA_BRACO_NORTE,
-            "mensagem": "A ANA respondeu, mas não retornou medições de nível no período consultado."
+            "codigo_ana": CODIGO_ANA_NIVEL_BRACO_NORTE,
+            "mensagem": "A ANA respondeu, mas o campo Nivel está vazio no período consultado.",
+            "registros_consultados": len(registros)
         }
 
     ultima = medicoes[-1]
@@ -176,7 +199,7 @@ def buscar_nivel_ana():
         "status": "ok",
         "fonte": "ANA / TelemetriaWS1",
         "estacao": "Braço do Norte - Montante",
-        "codigo_ana": CODIGO_ANA_BRACO_NORTE,
+        "codigo_ana": CODIGO_ANA_NIVEL_BRACO_NORTE,
         "data_ultima_medicao": ultima["data_hora"],
         "nivel_cm": nivel_cm,
         "nivel_m": round(nivel_cm / 100, 2),
@@ -185,18 +208,62 @@ def buscar_nivel_ana():
     }
 
 
+def buscar_chuva_ana():
+    registros = consultar_ana(CODIGO_ANA_CHUVA_BRACO_NORTE, dias=10)
+
+    medicoes = []
+
+    for r in registros:
+        chuva = r.get("chuva")
+
+        if chuva:
+            try:
+                chuva_mm = float(str(chuva).replace(",", "."))
+                medicoes.append({
+                    "data_hora": r.get("data_hora"),
+                    "chuva_mm": chuva_mm
+                })
+            except Exception:
+                continue
+
+    if not medicoes:
+        return {
+            "status": "sem_dados",
+            "fonte": "ANA / TelemetriaWS1",
+            "estacao": "Braço do Norte - Montante - Pluviométrica",
+            "codigo_ana": CODIGO_ANA_CHUVA_BRACO_NORTE,
+            "mensagem": "A ANA respondeu, mas o campo Chuva está vazio no período consultado.",
+            "registros_consultados": len(registros)
+        }
+
+    chuva_total = round(sum(m["chuva_mm"] for m in medicoes), 1)
+    ultima = medicoes[-1]
+
+    return {
+        "status": "ok",
+        "fonte": "ANA / TelemetriaWS1",
+        "estacao": "Braço do Norte - Montante - Pluviométrica",
+        "codigo_ana": CODIGO_ANA_CHUVA_BRACO_NORTE,
+        "data_ultima_medicao": ultima["data_hora"],
+        "chuva_ultimos_10_dias_mm": chuva_total,
+        "ultima_chuva_mm": ultima["chuva_mm"],
+        "quantidade_medicoes_com_chuva": len(medicoes)
+    }
+
+
 @app.get("/")
 def inicio():
     return {
         "status": "online",
         "sistema": "Monitor São Ludgero API",
-        "versao": "1.8"
+        "versao": "1.9"
     }
 
 
 @app.get("/previsao-chuva")
 def previsao_chuva(dias: int = 7):
     dados = buscar_previsao(dias)
+
     return {
         "local": "São Ludgero/SC",
         "fonte": "Open-Meteo",
@@ -233,6 +300,7 @@ def risco_hidrologico():
 def alertas_ativos():
     try:
         alertas = buscar_alertas_inmet()
+
         return {
             "local_referencia": "São Ludgero/SC",
             "fonte": "INMET - Alert-AS / CAP RSS",
@@ -240,6 +308,7 @@ def alertas_ativos():
             "alertas": alertas,
             "observacao": "Filtro por regiões de SC e apenas alertas ativos ou futuros."
         }
+
     except Exception as erro:
         return {
             "fonte": "INMET",
@@ -257,44 +326,39 @@ def nivel_rio_braco_norte():
             "status": "erro_na_consulta",
             "fonte": "ANA / TelemetriaWS1",
             "estacao": "Braço do Norte - Montante",
-            "codigo_ana": CODIGO_ANA_BRACO_NORTE,
+            "codigo_ana": CODIGO_ANA_NIVEL_BRACO_NORTE,
+            "erro": str(erro)
+        }
+
+
+@app.get("/chuva-ana-braco-norte")
+def chuva_ana_braco_norte():
+    try:
+        return buscar_chuva_ana()
+    except Exception as erro:
+        return {
+            "status": "erro_na_consulta",
+            "fonte": "ANA / TelemetriaWS1",
+            "estacao": "Braço do Norte - Montante - Pluviométrica",
+            "codigo_ana": CODIGO_ANA_CHUVA_BRACO_NORTE,
             "erro": str(erro)
         }
 
 
 @app.get("/debug-ana")
 def debug_ana():
-    hoje = datetime.now()
-    inicio = hoje - timedelta(days=10)
+    registros_nivel = consultar_ana(CODIGO_ANA_NIVEL_BRACO_NORTE, dias=10)
+    registros_chuva = consultar_ana(CODIGO_ANA_CHUVA_BRACO_NORTE, dias=10)
 
-    url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
-    params = {
-        "CodEstacao": CODIGO_ANA_BRACO_NORTE,
-        "DataInicio": inicio.strftime("%d/%m/%Y"),
-        "DataFim": hoje.strftime("%d/%m/%Y")
+    return {
+        "nivel": {
+            "codigo": CODIGO_ANA_NIVEL_BRACO_NORTE,
+            "registros": len(registros_nivel),
+            "amostra": registros_nivel[:3]
+        },
+        "chuva": {
+            "codigo": CODIGO_ANA_CHUVA_BRACO_NORTE,
+            "registros": len(registros_chuva),
+            "amostra": registros_chuva[:3]
+        }
     }
-
-    try:
-        resposta = requests.get(url, params=params, timeout=30)
-
-        tags = []
-        texto_resposta = resposta.text[:2000]
-
-        try:
-            raiz = ET.fromstring(resposta.content)
-            tags = sorted(set([item.tag.split("}")[-1] for item in raiz.iter()]))
-        except Exception:
-            pass
-
-        return {
-            "status_http": resposta.status_code,
-            "url_consultada": resposta.url,
-            "primeiros_2000_caracteres": texto_resposta,
-            "tags_encontradas": tags
-        }
-
-    except Exception as erro:
-        return {
-            "status": "erro_debug",
-            "erro": str(erro)
-        }
