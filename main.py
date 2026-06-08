@@ -32,9 +32,9 @@ def buscar_previsao(dias: int = 7):
         "timezone": TIMEZONE,
         "forecast_days": dias
     }
-    resposta = requests.get(url, params=params, timeout=20)
-    resposta.raise_for_status()
-    return resposta.json()
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
 
 def classificar_risco(acumulado_72h: float, acumulado_7d: float):
@@ -79,9 +79,7 @@ def buscar_alertas_inmet():
     resposta = requests.get(url_base, timeout=20)
     resposta.raise_for_status()
 
-    texto = resposta.text
-    ids = sorted(set(re.findall(r"avisos/(?:rss/)?(\d+)", texto)))
-
+    ids = sorted(set(re.findall(r"avisos/(?:rss/)?(\d+)", resposta.text)))
     alertas = []
     agora = datetime.now().astimezone()
 
@@ -89,7 +87,6 @@ def buscar_alertas_inmet():
         try:
             url_aviso = f"https://apiprevmet3.inmet.gov.br/avisos/rss/{aviso_id}"
             r = requests.get(url_aviso, timeout=15)
-
             if r.status_code != 200:
                 continue
 
@@ -105,18 +102,11 @@ def buscar_alertas_inmet():
             instruction = texto_xml(raiz, "instruction")
             area_desc = texto_xml(raiz, "areaDesc") or ""
 
-            pertence_regiao = any(
-                termo.lower() in area_desc.lower()
-                for termo in TERMOS_REGIAO_SC
-            )
-
-            if not pertence_regiao:
+            if not any(t.lower() in area_desc.lower() for t in TERMOS_REGIAO_SC):
                 continue
 
-            if expires:
-                data_fim = datetime.fromisoformat(expires)
-                if data_fim < agora:
-                    continue
+            if expires and datetime.fromisoformat(expires) < agora:
+                continue
 
             alertas.append({
                 "id": aviso_id,
@@ -141,23 +131,19 @@ def buscar_alertas_inmet():
 
 def buscar_nivel_ana():
     hoje = datetime.now()
-    inicio = hoje - timedelta(days=3)
-
-    data_inicio = inicio.strftime("%d/%m/%Y")
-    data_fim = hoje.strftime("%d/%m/%Y")
+    inicio = hoje - timedelta(days=10)
 
     url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
     params = {
         "CodEstacao": CODIGO_ANA_BRACO_NORTE,
-        "DataInicio": data_inicio,
-        "DataFim": data_fim
+        "DataInicio": inicio.strftime("%d/%m/%Y"),
+        "DataFim": hoje.strftime("%d/%m/%Y")
     }
 
     resposta = requests.get(url, params=params, timeout=30)
     resposta.raise_for_status()
 
     raiz = ET.fromstring(resposta.content)
-
     medicoes = []
 
     for item in raiz.iter():
@@ -165,9 +151,7 @@ def buscar_nivel_ana():
 
         if "Nivel" in tags:
             try:
-                nivel_texto = tags.get("Nivel")
-                nivel_cm = float(str(nivel_texto).replace(",", "."))
-
+                nivel_cm = float(str(tags.get("Nivel")).replace(",", "."))
                 medicoes.append({
                     "data_hora": tags.get("DataHora"),
                     "nivel_cm": nivel_cm,
@@ -182,12 +166,11 @@ def buscar_nivel_ana():
             "fonte": "ANA / TelemetriaWS1",
             "estacao": "Braço do Norte - Montante",
             "codigo_ana": CODIGO_ANA_BRACO_NORTE,
-            "mensagem": "A ANA respondeu, mas não retornou medições de nível para os últimos 3 dias."
+            "mensagem": "A ANA respondeu, mas não retornou medições de nível no período consultado."
         }
 
     ultima = medicoes[-1]
     nivel_cm = ultima["nivel_cm"]
-    nivel_m = round(nivel_cm / 100, 2)
 
     return {
         "status": "ok",
@@ -196,7 +179,7 @@ def buscar_nivel_ana():
         "codigo_ana": CODIGO_ANA_BRACO_NORTE,
         "data_ultima_medicao": ultima["data_hora"],
         "nivel_cm": nivel_cm,
-        "nivel_m": nivel_m,
+        "nivel_m": round(nivel_cm / 100, 2),
         "vazao": ultima["vazao"],
         "situacao": classificar_nivel_rio(nivel_cm)
     }
@@ -207,7 +190,7 @@ def inicio():
     return {
         "status": "online",
         "sistema": "Monitor São Ludgero API",
-        "versao": "1.7"
+        "versao": "1.8"
     }
 
 
@@ -261,9 +244,7 @@ def alertas_ativos():
         return {
             "fonte": "INMET",
             "status": "erro_na_consulta",
-            "mensagem": "Não foi possível consultar automaticamente os alertas do INMET neste momento.",
-            "erro": str(erro),
-            "consulta_manual": "https://alertas2.inmet.gov.br/"
+            "erro": str(erro)
         }
 
 
@@ -277,6 +258,43 @@ def nivel_rio_braco_norte():
             "fonte": "ANA / TelemetriaWS1",
             "estacao": "Braço do Norte - Montante",
             "codigo_ana": CODIGO_ANA_BRACO_NORTE,
-            "mensagem": "Não foi possível consultar automaticamente o nível do rio na ANA neste momento.",
+            "erro": str(erro)
+        }
+
+
+@app.get("/debug-ana")
+def debug_ana():
+    hoje = datetime.now()
+    inicio = hoje - timedelta(days=10)
+
+    url = "https://telemetriaws1.ana.gov.br/ServiceANA.asmx/DadosHidrometeorologicos"
+    params = {
+        "CodEstacao": CODIGO_ANA_BRACO_NORTE,
+        "DataInicio": inicio.strftime("%d/%m/%Y"),
+        "DataFim": hoje.strftime("%d/%m/%Y")
+    }
+
+    try:
+        resposta = requests.get(url, params=params, timeout=30)
+
+        tags = []
+        texto_resposta = resposta.text[:2000]
+
+        try:
+            raiz = ET.fromstring(resposta.content)
+            tags = sorted(set([item.tag.split("}")[-1] for item in raiz.iter()]))
+        except Exception:
+            pass
+
+        return {
+            "status_http": resposta.status_code,
+            "url_consultada": resposta.url,
+            "primeiros_2000_caracteres": texto_resposta,
+            "tags_encontradas": tags
+        }
+
+    except Exception as erro:
+        return {
+            "status": "erro_debug",
             "erro": str(erro)
         }
